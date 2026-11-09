@@ -6,7 +6,6 @@ from typing import List
 import requests
 from pydantic import Field
 
-from hummingbot.core.data_type.common import MarketDict
 from hummingbot.strategy_v2.controllers.controller_base import ControllerBase, ControllerConfigBase
 from hummingbot.strategy_v2.models.executor_actions import ExecutorAction
 
@@ -24,7 +23,7 @@ class TelegramNotifierConfig(ControllerConfigBase):
     chat_id: str = Field(default="")
     check_interval_seconds: int = Field(default=15)
 
-    def update_markets(self, markets: MarketDict) -> MarketDict:
+    def update_markets(self, markets) -> dict:
         return markets
 
 
