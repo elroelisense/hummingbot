@@ -116,3 +116,7 @@ coverage.xml
 # developer has checked out, which is not this repo's business — and it is how a
 # `hagent` server pointing at a `harness/` directory ended up committed here.
 .mcp.json
+
+# Telegram monitor con BOT_TOKEN en claro — nunca commitear
+telegram_monitor_v2.py
+conf/controllers/conf_telegram_notifier.yml
