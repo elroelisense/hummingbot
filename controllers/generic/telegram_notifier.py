@@ -38,6 +38,7 @@ class TelegramNotifier(ControllerBase):
         self._seen = set()
         self._started = False
         self._tg_offset = 0
+        self._alert_price = None
         self._init_seen()
 
     def _db_paths(self):
@@ -129,6 +130,66 @@ class TelegramNotifier(ControllerBase):
         lines.append(f"\nFills vistos: {len(self._seen)}")
         return "\n".join(lines)
 
+    def _pnl_text(self):
+        per_ctrl = {}
+        for db in self._db_paths():
+            try:
+                con = sqlite3.connect(db)
+                for cid, pnl, fees, filled in con.execute(
+                    "SELECT controller_id, net_pnl_quote, cum_fees_quote, filled_amount_quote FROM Executors"
+                ):
+                    cid = cid or "desconocido"
+                    a = per_ctrl.setdefault(cid, [0.0, 0.0, 0.0, 0])
+                    a[0] += pnl or 0
+                    a[1] += fees or 0
+                    a[2] += filled or 0
+                    a[3] += 1
+                con.close()
+            except Exception:
+                continue
+        if not per_ctrl:
+            return "ℹ️ Sin executors registrados aún."
+        lines = ["📈 <b>PnL POR CONTROLLER:</b>"]
+        tot = 0.0
+        for cid, (pnl, fees, filled, n) in sorted(per_ctrl.items()):
+            tot += pnl
+            lines.append(f"{cid}: PnL ${pnl:.4f} | fees ${fees:.4f} | fills ${filled:.2f} ({n} exec)")
+        lines.append(f"\n<b>Total PnL: ${tot:.4f}</b>")
+        return "\n".join(lines)
+
+    def _orders_text(self):
+        lines = ["🧾 <b>ÓRDENES ABIERTAS (recientes):</b>"]
+        total = 0
+        for db in self._db_paths():
+            try:
+                con = sqlite3.connect(db)
+                rows = con.execute(
+                    "SELECT market, symbol, last_status, creation_timestamp FROM \"Order\" "
+                    "WHERE last_status LIKE '%Created' ORDER BY creation_timestamp DESC LIMIT 15"
+                ).fetchall()
+                con.close()
+            except Exception:
+                continue
+            for market, symbol, status, ts in rows:
+                fecha = time.strftime('%H:%M', time.localtime(ts / 1000 if ts > 1e11 else ts))
+                lines.append(f"{market} {symbol} {status} — {fecha}")
+                total += 1
+        if total == 0:
+            return "ℹ️ Sin órdenes abiertas registradas en DB (ver status en Hummingbot)."
+        lines.append(f"\nTotal: {total}")
+        return "\n".join(lines)
+
+    def _check_alert(self):
+        if self._alert_price is None:
+            return
+        try:
+            mid = float(self.market_data_provider.get_price_by_type("binance", "PEPE-USDT", PriceType.MidPrice) or 0)
+        except Exception:
+            return
+        if mid and mid >= self._alert_price:
+            self._send(f"🚨 <b>ALERTA DE PRECIO:</b> PEPE-USDT tocó {mid:.8f} (alerta: {self._alert_price})")
+            self._alert_price = None
+
     def _poll_commands(self):
         if not self.config.bot_token or not self.config.chat_id:
             return
@@ -147,13 +208,31 @@ class TelegramNotifier(ControllerBase):
                 if chat != str(self.config.chat_id):
                     continue  # seguridad: solo responde a tu chat
                 if msg in ("/start", "/help"):
-                    self._send("🤖 Comandos:\n/status — precios ambos exchanges\n/balance — saldos + total\n/history — últimos fills\n/ping — conexión")
+                    self._send("🤖 Comandos:\n/status — precios ambos exchanges\n/balance — saldos + total\n/history — últimos fills\n/pnl — PnL por controller\n/orders — órdenes abiertas\n/alerta 0.00000550 — aviso al tocar precio (/alerta off para cancelar)\n/ping — conexión")
                 elif msg == "/status":
                     self._send(self._status_text())
                 elif msg == "/balance":
                     self._send(self._balance_text())
                 elif msg == "/history":
                     self._send(self._history_text())
+                elif msg == "/pnl":
+                    self._send(self._pnl_text())
+                elif msg == "/orders":
+                    self._send(self._orders_text())
+                elif msg.startswith("/alerta"):
+                    parts = msg.split()
+                    if len(parts) < 2:
+                        cur = self._alert_price if self._alert_price else "ninguna"
+                        self._send(f"🚨 Alerta actual: {cur}\nUso: /alerta 0.00000550")
+                    elif parts[1] == "off":
+                        self._alert_price = None
+                        self._send("🚨 Alerta de precio cancelada.")
+                    else:
+                        try:
+                            self._alert_price = float(parts[1])
+                            self._send(f"🚨 Alerta creada: avisaré si PEPE-USDT ≥ {self._alert_price}")
+                        except ValueError:
+                            self._send("⚠️ Precio inválido. Ej: /alerta 0.00000550")
                 elif msg == "/ping":
                     self._send("🏓 Pong! Notificador integrado activo.")
         except Exception as e:
@@ -171,6 +250,7 @@ class TelegramNotifier(ControllerBase):
             return []
         self._last_check = now
         self._poll_commands()
+        self._check_alert()
         for db in self._db_paths():
             try:
                 con = sqlite3.connect(db)
