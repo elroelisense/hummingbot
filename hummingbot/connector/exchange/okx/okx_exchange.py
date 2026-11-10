@@ -37,7 +37,7 @@ class OkxExchange(ExchangePyBase):
                  okx_registration_sub_domain: str = "www"):
         """
         :param okx_registration_sub_domain: The subdomain to use - options are "www" (default), "app" (US users), or "my" (EEA users)
-                              See: https://github.com/ccxt/ccxt/issues/24601
+                                              See: https://github.com/ccxt/ccxt/issues/24601
         """
         self.okx_api_key = okx_api_key
         self.okx_secret_key = okx_secret_key
@@ -108,18 +108,9 @@ class OkxExchange(ExchangePyBase):
         return is_time_synchronizer_related
 
     def _is_order_not_found_during_status_update_error(self, status_update_exception: Exception) -> bool:
-        # TODO: implement this method correctly for the connector
-        # The default implementation was added when the functionality to detect not found orders was introduced in the
-        # ExchangePyBase class. Also fix the unit test test_lost_order_removed_if_not_found_during_order_status_update
-        # when replacing the dummy implementation
         return False
 
     def _is_order_not_found_during_cancelation_error(self, cancelation_exception: Exception) -> bool:
-        # TODO: implement this method correctly for the connector
-        # The default implementation was added when the functionality to detect not found orders was introduced in the
-        # ExchangePyBase class. Also fix the unit test test_cancel_order_not_found_in_the_exchange when replacing the
-        # dummy implementation
-        # _place_cancel already takes care of all expected exceptions.
         return False
 
     def _create_web_assistants_factory(self) -> WebAssistantsFactory:
@@ -164,7 +155,6 @@ class OkxExchange(ExchangePyBase):
         return fee
 
     async def _initialize_trading_pair_symbol_map(self):
-        # This has to be reimplemented because the request requires an extra parameter
         try:
             exchange_info = await self._api_get(
                 path_url=self.trading_pairs_request_path,
@@ -195,13 +185,12 @@ class OkxExchange(ExchangePyBase):
             "tdMode": "cash",
             "ordType": CONSTANTS.ORDER_TYPE_MAP[order_type],
             "side": trade_type.name.lower(),
-            "instId": await self.exchange_symbol_associated_to_pair(trading_pair=trading_pair),
+            "instId": await self.exchange_symbol_associated_to_pair(trading_pair),
             "sz": str(amount),
         }
         if order_type.is_limit_type():
             data["px"] = f"{price:f}"
         else:
-            # Specify that the order quantity for market orders is denominated in base currency
             data["tgtCcy"] = "base_ccy"
 
         exchange_order_id = await self._api_request(
@@ -217,9 +206,6 @@ class OkxExchange(ExchangePyBase):
         return str(data["ordId"]), self.current_timestamp
 
     async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder):
-        """
-        This implementation specific function is called by _cancel, and returns True if successful
-        """
         params = {
             "clOrdId": order_id,
             "instId": tracked_order.trading_pair
@@ -232,10 +218,8 @@ class OkxExchange(ExchangePyBase):
         if cancel_result["data"][0]["sCode"] == "0":
             final_result = True
         elif cancel_result["data"][0]["sCode"] == "51400":
-            # Cancelation failed because the order does not exist
             final_result = True
         elif cancel_result["data"][0]["sCode"] == "51401":
-            # Cancelation failed because order has been cancelled
             final_result = True
         else:
             raise IOError(f"Error cancelling order {order_id}: {cancel_result}")
@@ -251,12 +235,11 @@ class OkxExchange(ExchangePyBase):
             path_url=CONSTANTS.OKX_TICKERS_PATH,
             params=params,
         )
-        # some markets have no last traded price, so filter them out
         last_traded_prices = {ticker["instId"]: float(ticker["last"]) for ticker in resp_json["data"] if ticker["last"]}
         return last_traded_prices
 
     async def _get_last_traded_price(self, trading_pair: str) -> float:
-        params = {"instId": await self.exchange_symbol_associated_to_pair(trading_pair=trading_pair)}
+        params = {"instId": await self.exchange_symbol_associated_to_pair(trading_pair)}
 
         resp_json = await self._api_request(
             path_url=CONSTANTS.OKX_TICKER_PATH,
@@ -296,8 +279,6 @@ class OkxExchange(ExchangePyBase):
         self._account_available_balances[balance_details["ccy"]] = available
 
     async def _update_trading_rules(self):
-        # This has to be reimplemented because the request requires an extra parameter
-        # TODO: Normalize the rest requests so they can be used standalone
         exchange_info = await self._api_get(
             path_url=self.trading_rules_request_path,
             params={"instType": "SPOT"},
@@ -311,12 +292,16 @@ class OkxExchange(ExchangePyBase):
     async def _format_trading_rules(self, raw_trading_pair_info: List[Dict[str, Any]]) -> List[TradingRule]:
         trading_rules = []
 
+        symbol_map = await self.trading_pair_symbol_map()
         for info in raw_trading_pair_info.get("data", []):
             try:
                 if okx_utils.is_exchange_information_valid(exchange_info=info):
+                    inst_id = info["instId"]
+                    if inst_id not in symbol_map:
+                        continue
                     trading_rules.append(
                         TradingRule(
-                            trading_pair=await self.trading_pair_associated_to_exchange_symbol(symbol=info["instId"]),
+                            trading_pair=await self.trading_pair_associated_to_exchange_symbol(info["instId"]),
                             min_order_size=Decimal(info["minSz"]),
                             min_price_increment=Decimal(info["tickSz"]),
                             min_base_amount_increment=Decimal(info["lotSz"]),
@@ -327,9 +312,6 @@ class OkxExchange(ExchangePyBase):
         return trading_rules
 
     async def _update_trading_fees(self):
-        """
-        Update fees information from the exchange
-        """
         pass
 
     async def _request_order_update(self, order: InFlightOrder) -> Dict[str, Any]:
