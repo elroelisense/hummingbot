@@ -125,4 +125,10 @@ conf/controllers/conf_telegram_notifier.yml
 creds_abot.json
 data/supervisor_abot_state.json
 data/supervisor_abot.lock
+data/hb_password.dat
+data/hbot.lock
+data/abot_watchdog.lock
+data/abot_watchdog_state.json
+data/ABOT_MAINTENANCE
 logs/supervisor_*.log
+logs/abot_*.log

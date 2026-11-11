@@ -22,7 +22,6 @@ from hummingbot.client.runner import (
 from hummingbot.client.ui import login_prompt
 from hummingbot.client.ui.style import load_style
 from hummingbot.core.event.events import HummingbotUIEvent
-from hummingbot.core.management.console import start_management_console
 from hummingbot.core.utils.async_utils import safe_gather
 
 
@@ -108,6 +107,7 @@ async def run_application(hb: HummingbotApplication, args: argparse.Namespace, c
 
         tasks: List[Coroutine] = [hb.run()]
         if client_config_map.debug_console:
+            from hummingbot.core.management.console import start_management_console
             management_port: int = detect_available_port(8211)
             tasks.append(start_management_console(locals(), host="localhost", port=management_port))
 

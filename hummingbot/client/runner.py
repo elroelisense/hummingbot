@@ -10,10 +10,8 @@ Keep this module free of host concerns (no typer, no argparse, no prompt-toolkit
 to build the application and load/start a strategy.
 """
 import asyncio
-import grp
 import logging
 import os
-import pwd
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -31,6 +29,12 @@ from hummingbot.client.settings import SCRIPT_STRATEGY_CONF_DIR_PATH, STRATEGIES
 
 
 def autofix_permissions(user_group_spec: str) -> None:
+    # POSIX-only helper: on Windows there is no uid/gid or sudo, so this is a no-op.
+    if os.name == "nt":
+        return
+    import grp
+    import pwd
+
     uid, gid = [sub_str for sub_str in user_group_spec.split(':')]
 
     uid = int(uid) if uid.isnumeric() else pwd.getpwnam(uid).pw_uid
