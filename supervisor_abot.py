@@ -63,6 +63,41 @@ CONF_DIR = BASE_DIR / "conf" / "controllers"
 CREDENTIALS_FILE = BASE_DIR / "creds_abot.json"
 STATE_FILE = BASE_DIR / "data" / "supervisor_abot_state.json"
 LOG_FILE = BASE_DIR / "logs" / "supervisor_abot.log"
+LOCK_FILE = BASE_DIR / "data" / "supervisor_abot.lock"
+
+_lock_handle = None
+
+
+def acquire_single_instance_lock() -> bool:
+    """Impide dos supervisores escribiendo los mismos YAML a la vez.
+
+    El lock se libera solo cuando el proceso muere (aunque sea por crash),
+    así que no deja bloqueos fantasma.
+    """
+    global _lock_handle
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(LOCK_FILE, "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(" ")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return False
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    _lock_handle = handle
+    return True
 
 CHECK_INTERVAL_SECONDS = 180          # cada 3 min (el PMM refresca cada 120 s)
 HTTP_TIMEOUT = 15
@@ -602,6 +637,10 @@ def main():
     log("ABOT Supervisor v2 iniciado" + (" (DRY-RUN)" if args.dry_run else ""))
     log(f"intervalo={CHECK_INTERVAL_SECONDS}s | par={PAIR} | tope/controller={MAX_QUOTE} USDT")
     log(f"inventario máx={MAX_INVENTORY_PCT:.0%} | uso USDT libre={FREE_USE_PCT:.0%}")
+
+    if not args.dry_run and not acquire_single_instance_lock():
+        log("[ABORT] Ya hay otro supervisor_abot.py activo. Cierro este para no duplicar escrituras.")
+        return 2
 
     creds = load_credentials()
     if not creds:
