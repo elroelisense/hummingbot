@@ -120,3 +120,8 @@ coverage.xml
 # Telegram monitor con BOT_TOKEN en claro — nunca commitear
 telegram_monitor_v2.py
 conf/controllers/conf_telegram_notifier.yml
+
+# Credenciales del supervisor ABOT (API keys en claro) - nunca commitear
+creds_abot.json
+data/supervisor_abot_state.json
+logs/supervisor_*.log
