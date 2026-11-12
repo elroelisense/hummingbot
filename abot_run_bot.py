@@ -73,6 +73,9 @@ def main() -> int:
         env["CONFIG_PASSWORD"] = password
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
+        # prompt_toolkit falla si TERM=xterm-256color (Git Bash/Cygwin en PATH)
+        env.pop("TERM", None)
+        env["TERM"] = ""
 
         cmd = [bot_python(), str(BASE_DIR / "bin" / "hummingbot_quickstart.py"), "--v2", V2_CONF]
         log(f"lanzando: {' '.join(cmd)}")
