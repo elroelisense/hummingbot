@@ -365,7 +365,21 @@ class OkxExchange(ExchangePyBase):
     async def _request_order_status(self, tracked_order: InFlightOrder) -> OrderUpdate:
         updated_order_data = await self._request_order_update(order=tracked_order)
 
-        order_data = updated_order_data["data"][0]
+        # OKX a veces devuelve data vacia para ordenes ya canceladas/filled
+        # ("lost orders"). En ese caso marcar como cancelada para dejar de
+        # consultarla y evitar el spam de "list index out of range".
+        data = updated_order_data.get("data", []) if isinstance(updated_order_data, dict) else []
+        if not data:
+            self.logger().debug("OKX devolvio data vacia para %s; marcando como cancelada." % tracked_order.client_order_id)
+            return OrderUpdate(
+                client_order_id=tracked_order.client_order_id,
+                exchange_order_id=tracked_order.exchange_order_id,
+                trading_pair=tracked_order.trading_pair,
+                update_timestamp=self.current_timestamp,
+                new_state=OrderState.CANCELED,
+            )
+
+        order_data = data[0]
         new_state = CONSTANTS.ORDER_STATE[order_data["state"]]
 
         order_update = OrderUpdate(
