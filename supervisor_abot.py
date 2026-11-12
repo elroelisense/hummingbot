@@ -513,36 +513,36 @@ def compute_settings(exchange: str, bal: Dict, regime: str, vol: float,
     Calcula los campos a escribir en el YAML del PMM de un exchange.
     Devuelve (settings, motivo_pausa|"").
 
-    global_inv_pct = % del portafolio TOTAL que está en PEPE (no por exchange):
-    si estamos 98% en PEPE, no tiene sentido seguir comprando en el exchange
-    que todavía tenga algo de USDT libre.
+    global_inv_pct = % del portafolio TOTAL que esta en PEPE (no por exchange).
+    vol = volatilidad 5m para escalar notional por volatilidad.
     """
     buy_spread, sell_spread = regime_spreads(regime, vol)
 
     usdt_free = bal["usdt_free"]
     min_buy = MIN_BUY_BINANCE if exchange == "binance" else MIN_BUY_OKX
 
+    # Escalar notional por volatilidad: en alta vol, vender/comprar mas.
+    vol_mult = max(0.6, min(1.5, vol / VOL_BASE_5M if VOL_BASE_5M else 1.0))
+
     pause_reason = ""
     rebalance_mode = "normal"
     if regime == "CRASH":
-        pause_reason = "CRASH: no comprar en caída libre"
+        pause_reason = "CRASH: no comprar en caida libre"
     elif global_inv_pct > CRITICAL_INVENTORY_PCT:
-        pause_reason = f"inventario PEPE CRÍTICO {global_inv_pct:.1%} > {CRITICAL_INVENTORY_PCT:.0%}"
+        pause_reason = "inventario PEPE CRITICO %.1f%% > %.0f%%" % (global_inv_pct*100, CRITICAL_INVENTORY_PCT*100)
         rebalance_mode = "aggressive_sell"
     elif global_inv_pct > MAX_INVENTORY_PCT:
-        pause_reason = f"inventario PEPE alto {global_inv_pct:.1%} > {MAX_INVENTORY_PCT:.0%}"
+        pause_reason = "inventario PEPE alto %.1f%% > %.0f%%" % (global_inv_pct*100, MAX_INVENTORY_PCT*100)
         rebalance_mode = "sell_only"
     elif usdt_free < min_buy:
-        pause_reason = f"USDT libre {usdt_free:.2f} < mínimo {min_buy:.2f}"
+        pause_reason = "USDT libre %.2f < minimo %.2f" % (usdt_free, min_buy)
 
     if pause_reason:
-        # Sin compras: buy_spreads vacío => el PMM no crea niveles de compra.
-        # Toda la asignación va al lado de venta para recuperar quote.
         if rebalance_mode == "aggressive_sell":
-            sell_target = AGGRESSIVE_SELL_QUOTE
+            sell_target = min(10.0, AGGRESSIVE_SELL_QUOTE * vol_mult)
             sell_sp = max(0.002, round(sell_spread * 0.5, 4))
         else:
-            sell_target = SELL_QUOTE_TARGET
+            sell_target = min(8.0, SELL_QUOTE_TARGET * vol_mult)
             sell_sp = sell_spread
         settings = {
             "total_amount_quote": round(sell_target, 2),
@@ -553,9 +553,8 @@ def compute_settings(exchange: str, bal: Dict, regime: str, vol: float,
         }
         return settings, pause_reason
 
-    # Con compras: ajustar split según inventario.
+    # Con compras: ajustar split segun inventario.
     if global_inv_pct <= LOW_INVENTORY_PCT:
-        # Acumular PEPE: más compra, menos venta
         buy_pct = 0.7
         sell_pct = 0.3
         total = min(MAX_QUOTE, max(2.0, (usdt_free * FREE_USE_PCT) / buy_pct))
@@ -563,7 +562,8 @@ def compute_settings(exchange: str, bal: Dict, regime: str, vol: float,
         buy_pct = 0.5
         sell_pct = 0.5
         total = min(MAX_QUOTE, max(2.0, (usdt_free * FREE_USE_PCT) / 0.5))
-    total = round(total, 2)
+    total = round(total * vol_mult, 2)
+    total = max(2.0, min(MAX_QUOTE, total))
     settings = {
         "total_amount_quote": total,
         "buy_spreads": [buy_spread],
@@ -572,6 +572,7 @@ def compute_settings(exchange: str, bal: Dict, regime: str, vol: float,
         "sell_amounts_pct": [sell_pct],
     }
     return settings, ""
+
 
 
 def ladder_recommendation(price: float, regime: str) -> str:

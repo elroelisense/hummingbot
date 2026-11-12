@@ -14,6 +14,7 @@ class V2WithControllersConfig(StrategyV2ConfigBase):
     script_file_name: str = os.path.basename(__file__)
     max_global_drawdown_quote: Optional[float] = None
     max_controller_drawdown_quote: Optional[float] = None
+    max_global_drawdown_emergency_quote: Optional[float] = None
 
 
 class V2WithControllers(StrategyV2Base):
@@ -55,7 +56,9 @@ class V2WithControllers(StrategyV2Base):
         for controller_id, controller in self.controllers.items():
             if controller.status != RunnableStatus.RUNNING:
                 continue
-            controller_pnl = self.get_performance_report(controller_id).global_pnl_quote
+            # Usar PnL realizado (no mark-to-market) para evitar que el kill
+            # switch dispare por ruido de mercado en un portafolio 95% PEPE.
+            controller_pnl = self.get_performance_report(controller_id).realized_pnl_quote
             last_max_pnl = self.max_pnl_by_controller[controller_id]
             if controller_pnl > last_max_pnl:
                 self.max_pnl_by_controller[controller_id] = controller_pnl
@@ -74,14 +77,27 @@ class V2WithControllers(StrategyV2Base):
                     self.drawdown_exited_controllers.append(controller_id)
 
     def check_max_global_drawdown(self):
-        current_global_pnl = sum([self.get_performance_report(controller_id).global_pnl_quote for controller_id in self.controllers.keys()])
+        # Usar PnL realizado (no mark-to-market) para evitar que el kill
+        # switch dispare por ruido de mercado en un portafolio 95% PEPE.
+        current_global_pnl = sum([self.get_performance_report(controller_id).realized_pnl_quote for controller_id in self.controllers.keys()])
         if current_global_pnl > self.max_global_pnl:
             self.max_global_pnl = current_global_pnl
         else:
             current_global_drawdown = self.max_global_pnl - current_global_pnl
             if current_global_drawdown > self.config.max_global_drawdown_quote:
                 self.drawdown_exited_controllers.extend(list(self.controllers.keys()))
-                self.logger().info("Global drawdown reached. Stopping the strategy.")
+                self.logger().info("Global drawdown (realized) reached. Stopping the strategy.")
+                self._is_stop_triggered = True
+                HummingbotApplication.main_application().stop()
+
+        # Kill switch de emergencia basado en mark-to-market (umbral alto).
+        # Protege contra caidas catastroficas de PEPE que el realized no captura.
+        emergency_threshold = getattr(self.config, "max_global_drawdown_emergency_quote", None)
+        if emergency_threshold:
+            mtm_pnl = sum([self.get_performance_report(cid).global_pnl_quote for cid in self.controllers.keys()])
+            if mtm_pnl < -emergency_threshold:
+                self.drawdown_exited_controllers.extend(list(self.controllers.keys()))
+                self.logger().info("EMERGENCY drawdown (mark-to-market) reached. Stopping the strategy.")
                 self._is_stop_triggered = True
                 HummingbotApplication.main_application().stop()
 
