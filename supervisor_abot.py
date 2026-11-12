@@ -102,6 +102,33 @@ def acquire_single_instance_lock() -> bool:
 CHECK_INTERVAL_SECONDS = 180          # cada 3 min (el PMM refresca cada 120 s)
 HTTP_TIMEOUT = 15
 
+# --- Retry con backoff para todas las llamadas HTTP ---
+_original_requests_get = requests.get
+_original_requests_post = requests.post
+_original_requests_delete = requests.delete
+
+
+def _http_with_retry(func):
+    def wrapper(*args, **kwargs):
+        last_exc = None
+        for attempt in range(3):
+            try:
+                r = func(*args, **kwargs)
+                if r.status_code < 500:
+                    return r
+            except requests.exceptions.RequestException as e:
+                last_exc = e
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+        if last_exc:
+            raise last_exc
+        return func(*args, **kwargs)
+    return wrapper
+
+requests.get = _http_with_retry(_original_requests_get)
+requests.post = _http_with_retry(_original_requests_post)
+requests.delete = _http_with_retry(_original_requests_delete)
+
 PAIR = "PEPE-USDT"
 BINANCE_SYMBOL = "PEPEUSDT"
 OKX_INST = "PEPE-USDT"
@@ -110,9 +137,12 @@ OKX_INST = "PEPE-USDT"
 FREE_USE_PCT = 0.80        # usamos como máximo el 80% del USDT libre
 MAX_QUOTE = 8.0            # tope por controller (USDT)
 SELL_QUOTE_TARGET = 5.0    # notional de venta cuando las compras están pausadas
+AGGRESSIVE_SELL_QUOTE = 8.0  # notional de venta cuando inventario crítico (>90% PEPE)
 MIN_BUY_BINANCE = 1.20     # minNotional Binance = 1.00 USDT (+ margen)
 MIN_BUY_OKX = 0.60         # minSz OKX = 100.000 PEPE (~0.46 USDT)
 MAX_INVENTORY_PCT = 0.85   # si PEPE > 85% del portafolio -> pausar compras
+CRITICAL_INVENTORY_PCT = 0.90  # si PEPE > 90% -> vender agresivamente
+LOW_INVENTORY_PCT = 0.70   # si PEPE < 70% -> acumular (más compra)
 
 # --- Detección de régimen ----------------------------------------------------
 CANDLE_INTERVAL = "5m"
@@ -493,34 +523,53 @@ def compute_settings(exchange: str, bal: Dict, regime: str, vol: float,
     min_buy = MIN_BUY_BINANCE if exchange == "binance" else MIN_BUY_OKX
 
     pause_reason = ""
+    rebalance_mode = "normal"
     if regime == "CRASH":
         pause_reason = "CRASH: no comprar en caída libre"
+    elif global_inv_pct > CRITICAL_INVENTORY_PCT:
+        pause_reason = f"inventario PEPE CRÍTICO {global_inv_pct:.1%} > {CRITICAL_INVENTORY_PCT:.0%}"
+        rebalance_mode = "aggressive_sell"
     elif global_inv_pct > MAX_INVENTORY_PCT:
-        pause_reason = f"inventario PEPE global {global_inv_pct:.1%} > {MAX_INVENTORY_PCT:.0%}"
+        pause_reason = f"inventario PEPE alto {global_inv_pct:.1%} > {MAX_INVENTORY_PCT:.0%}"
+        rebalance_mode = "sell_only"
     elif usdt_free < min_buy:
         pause_reason = f"USDT libre {usdt_free:.2f} < mínimo {min_buy:.2f}"
 
     if pause_reason:
         # Sin compras: buy_spreads vacío => el PMM no crea niveles de compra.
         # Toda la asignación va al lado de venta para recuperar quote.
+        if rebalance_mode == "aggressive_sell":
+            sell_target = AGGRESSIVE_SELL_QUOTE
+            sell_sp = max(0.002, round(sell_spread * 0.5, 4))
+        else:
+            sell_target = SELL_QUOTE_TARGET
+            sell_sp = sell_spread
         settings = {
-            "total_amount_quote": round(SELL_QUOTE_TARGET, 2),
+            "total_amount_quote": round(sell_target, 2),
             "buy_spreads": [],
             "buy_amounts_pct": [],
-            "sell_spreads": [sell_spread],
+            "sell_spreads": [sell_sp],
             "sell_amounts_pct": [1.0],
         }
         return settings, pause_reason
 
-    # Con compras: 50% compra / 50% venta. La compra nunca supera el USDT libre.
-    total = min(MAX_QUOTE, max(2.0, (usdt_free * FREE_USE_PCT) / 0.5))
+    # Con compras: ajustar split según inventario.
+    if global_inv_pct <= LOW_INVENTORY_PCT:
+        # Acumular PEPE: más compra, menos venta
+        buy_pct = 0.7
+        sell_pct = 0.3
+        total = min(MAX_QUOTE, max(2.0, (usdt_free * FREE_USE_PCT) / buy_pct))
+    else:
+        buy_pct = 0.5
+        sell_pct = 0.5
+        total = min(MAX_QUOTE, max(2.0, (usdt_free * FREE_USE_PCT) / 0.5))
     total = round(total, 2)
     settings = {
         "total_amount_quote": total,
         "buy_spreads": [buy_spread],
-        "buy_amounts_pct": [0.5],
+        "buy_amounts_pct": [buy_pct],
         "sell_spreads": [sell_spread],
-        "sell_amounts_pct": [0.5],
+        "sell_amounts_pct": [sell_pct],
     }
     return settings, ""
 
@@ -616,10 +665,33 @@ def run_once(creds: Dict, state: Dict, dry_run: bool) -> bool:
     for note in pause_notes:
         telegram_alert(state, f"pause_{note}", f"Compras PAUSADAS: {note}.", dry_run)
 
-    if global_inv_pct > MAX_INVENTORY_PCT:
+    if global_inv_pct > CRITICAL_INVENTORY_PCT:
+        telegram_alert(state, "inventory_critical",
+                       "Inventario PEPE CRITICO: %.1f%%. Venta agresiva activada (spread tighter, 8 USDT). USDT libre total %.2f." % (global_inv_pct*100, sum(b['usdt_free'] for b in (bal_b, bal_o) if b)), dry_run)
+    elif global_inv_pct > MAX_INVENTORY_PCT:
         telegram_alert(state, "inventory_high",
-                       f"Inventario PEPE {global_inv_pct:.1%} del portafolio. "
-                       f"USDT libre total {sum(b['usdt_free'] for b in (bal_b, bal_o) if b):.2f}.", dry_run)
+                       "Inventario PEPE %.1f%% del portafolio. USDT libre total %.2f." % (global_inv_pct*100, sum(b['usdt_free'] for b in (bal_b, bal_o) if b)), dry_run)
+
+    # Alerta de PnL diario
+    try:
+        import datetime as _dt
+        import sqlite3 as _sq
+        today = _dt.date.today().isoformat()
+        _con = _sq.connect(str(BASE_DIR / "data" / "conf_v6_global.sqlite"))
+        cur_pnl = _con.execute("select coalesce(sum(net_pnl_quote),0) from Executors where is_active=0").fetchone()[0]
+        _con.close()
+        prev = state.get("daily_pnl", {})
+        if prev.get("date") != today:
+            state["daily_pnl"] = {"date": today, "start_pnl": cur_pnl, "last_pnl": cur_pnl}
+        else:
+            last_pnl = prev.get("last_pnl", cur_pnl)
+            drop = last_pnl - cur_pnl
+            if drop > 2.0:
+                telegram_alert(state, "daily_pnl_drop",
+                               "PnL diario cayo %.2f USDT (de %+.2f a %+.2f). Revisar." % (drop, last_pnl, cur_pnl), dry_run)
+            state["daily_pnl"]["last_pnl"] = cur_pnl
+    except Exception:
+        pass
 
     state["last_run"] = time.time()
     state["last_price"] = price
