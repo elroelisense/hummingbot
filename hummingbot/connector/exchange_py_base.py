@@ -941,7 +941,7 @@ class ExchangePyBase(ExchangeBase, ABC):
 
         url = overwrite_url or await self._api_request_url(path_url=path_url, is_auth_required=is_auth_required)
 
-        for _ in range(2):
+        for _ in range(3):
             try:
                 request_result = await rest_assistant.execute_request(
                     url=url,
@@ -957,8 +957,12 @@ class ExchangePyBase(ExchangeBase, ABC):
                 return request_result
             except IOError as request_exception:
                 last_exception = request_exception
+                error_str = str(request_exception)
                 if self._is_request_exception_related_to_time_synchronizer(request_exception=request_exception):
                     await self._update_time_synchronizer()
+                elif "HTTP status is 429" in error_str:
+                    # Rate limit: retry con backoff exponencial
+                    await asyncio.sleep(2 ** _)
                 else:
                     raise
 

@@ -591,6 +591,109 @@ def ladder_recommendation(price: float, regime: str) -> str:
     return "ESCALERAS: sin cambios."
 
 
+def rebalance_inventory(creds: Dict, global_inv_pct: float,
+                      price: float, state: Dict, dry_run: bool) -> bool:
+    """
+    Rebalanceo real: si el inventario en PEPE supera el 95%, vende un chunk
+    de PEPE por USDT a mercado en el exchange con mas PEPE libre.
+    """
+    if global_inv_pct < 0.95:
+        return False
+    if dry_run:
+        log("[DRY-RUN] rebalance: venderia PEPE (inventario %.1f%%)" % (global_inv_pct*100))
+        return False
+
+    last = state.get("last_rebalance", 0)
+    if time.time() - last < 1800:
+        return False
+
+    bal_b = binance_balances(creds)
+    bal_o = okx_balances(creds)
+    if not bal_b or not bal_o:
+        return False
+
+    pepe_b = bal_b["pepe_free"]
+    pepe_o = bal_o["pepe_free"]
+    if pepe_b >= pepe_o and pepe_b * price >= 5.0:
+        exchange = "binance"
+        amount_pepe = min(pepe_b * 0.02, 5.0 / price)
+        amount_pepe = max(100000, round(amount_pepe))
+    elif pepe_o * price >= 5.0:
+        exchange = "okx"
+        amount_pepe = min(pepe_o * 0.02, 5.0 / price)
+        amount_pepe = max(100000, round(amount_pepe))
+    else:
+        return False
+
+    if exchange == "binance":
+        amount_pepe = round(amount_pepe)
+    else:
+        amount_pepe = (amount_pepe // 100000) * 100000
+    if amount_pepe < 100000:
+        return False
+
+    try:
+        if exchange == "binance":
+            key = creds["binance"]["api_key"]
+            secret = creds["binance"]["secret_key"]
+            ts = int(time.time() * 1000)
+            params = {
+                "symbol": BINANCE_SYMBOL,
+                "side": "SELL",
+                "type": "MARKET",
+                "quantity": str(amount_pepe),
+                "timestamp": ts,
+                "recvWindow": 5000,
+            }
+            query = "&".join("%s=%s" % (k, v) for k, v in sorted(params.items()))
+            sig = hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+            params["signature"] = sig
+            r = requests.post(
+                "https://api.binance.com/api/v3/order",
+                params=params,
+                headers={"X-MBX-APIKEY": key},
+                timeout=HTTP_TIMEOUT,
+            )
+            data = r.json()
+            if "orderId" in data:
+                log("[REBALANCE] vendido %d PEPE a mercado en Binance (~%.2f USDT)" % (amount_pepe, amount_pepe*price))
+                telegram_alert(state, "rebalance_sell",
+                               "Rebalanceo: vendido %d PEPE (~%.2f USDT) a mercado en Binance. Inventario era %.1f%%." % (amount_pepe, amount_pepe*price, global_inv_pct*100), dry_run)
+                state["last_rebalance"] = time.time()
+                return True
+            else:
+                log("[WARN] rebalance Binance fallo: %s" % data.get('msg', data))
+                return False
+        else:
+            path = "/api/v5/trade/order"
+            body = {
+                "instId": OKX_INST,
+                "tdMode": "cash",
+                "side": "sell",
+                "ordType": "market",
+                "sz": str(amount_pepe),
+            }
+            body_str = json.dumps(body, separators=(",", ":"))
+            r = requests.post(
+                "https://www.okx.com" + path,
+                data=body_str,
+                headers=_okx_headers(creds, "POST", path, body_str),
+                timeout=HTTP_TIMEOUT,
+            )
+            data = r.json()
+            if data.get("code") == "0":
+                log("[REBALANCE] vendido %d PEPE a mercado en OKX (~%.2f USDT)" % (amount_pepe, amount_pepe*price))
+                telegram_alert(state, "rebalance_sell",
+                               "Rebalanceo: vendido %d PEPE (~%.2f USDT) a mercado en OKX. Inventario era %.1f%%." % (amount_pepe, amount_pepe*price, global_inv_pct*100), dry_run)
+                state["last_rebalance"] = time.time()
+                return True
+            else:
+                log("[WARN] rebalance OKX fallo: %s (%s)" % (data.get('msg'), data.get('code')))
+                return False
+    except Exception as e:
+        log("[WARN] rebalance error: %s" % e)
+        return False
+
 def run_once(creds: Dict, state: Dict, dry_run: bool) -> bool:
     price_b = binance_mid()
     price_o = okx_mid()
@@ -672,6 +775,10 @@ def run_once(creds: Dict, state: Dict, dry_run: bool) -> bool:
     elif global_inv_pct > MAX_INVENTORY_PCT:
         telegram_alert(state, "inventory_high",
                        "Inventario PEPE %.1f%% del portafolio. USDT libre total %.2f." % (global_inv_pct*100, sum(b['usdt_free'] for b in (bal_b, bal_o) if b)), dry_run)
+
+    # Rebalanceo real: vender PEPE a mercado si inventario critico
+    if global_inv_pct > 0.95:
+        rebalance_inventory(creds, global_inv_pct, price, state, dry_run)
 
     # Alerta de PnL diario
     try:
