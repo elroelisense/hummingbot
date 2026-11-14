@@ -200,6 +200,30 @@ def ensure_once(logger=log) -> dict:
                 if stale > LOG_STALE_SECONDS:
                     logger("bot vivo pero log sin actualizar hace %.0f s -> trato como colgado" % stale)
                     bot_up = False
+                else:
+                    # Health check de trading: verificar que el bot esta operando,
+                    # no solo que el proceso esta vivo. Si en los ultimos 15 min
+                    # no hay ninguna linea de orden creada/llenada, esta stuck.
+                    try:
+                        size = log_path.stat().st_size
+                        with open(log_path, "rb") as f:
+                            f.seek(max(0, size - 200000))
+                            tail = f.read().decode("utf-8", "replace")
+                        trading_keywords = ("Created", "filled", "Filled", "OrderCreated", "OrderFilled", "completely filled")
+                        trading_lines = [l for l in tail.splitlines() if any(k in l for k in trading_keywords)]
+                        if trading_lines:
+                            last_trading_ts = None
+                            for l in reversed(trading_lines):
+                                m = __import__("re").match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", l)
+                                if m:
+                                    import datetime
+                                    last_trading_ts = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+                                    break
+                            if last_trading_ts and (time.time() - last_trading_ts) > 900:
+                                logger("bot vivo pero sin actividad de trading en %.0f min -> trato como colgado" % ((time.time()-last_trading_ts)/60))
+                                bot_up = False
+                    except Exception:
+                        pass
         except Exception:
             pass
 
