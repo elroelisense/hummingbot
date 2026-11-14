@@ -190,20 +190,22 @@ def ensure_once(logger=log) -> dict:
         return result
 
     bot_up = bot_is_running()
+    bot_stuck = False
 
-    # Deteccion de bot "colgado": proceso vivo pero log sin actualizar en 10 min.
+    # Deteccion de bot "colgado": proceso vivo pero log sin actualizar en 10 min
+    # O proceso vivo pero sin actividad de trading en 15 min.
     if bot_up:
         try:
             log_path = BASE_DIR / "logs" / "logs_conf_v6_global.log"
             if log_path.exists():
                 stale = time.time() - log_path.stat().st_mtime
                 if stale > LOG_STALE_SECONDS:
-                    logger("bot vivo pero log sin actualizar hace %.0f s -> trato como colgado" % stale)
+                    logger("bot vivo pero log sin actualizar hace %.0f s -> COLGADO" % stale)
+                    bot_stuck = True
                     bot_up = False
                 else:
-                    # Health check de trading: verificar que el bot esta operando,
-                    # no solo que el proceso esta vivo. Si en los ultimos 15 min
-                    # no hay ninguna linea de orden creada/llenada, esta stuck.
+                    # Health check de trading: si en los ultimos 15 min no hay
+                    # ninguna linea de orden creada/llenada, esta stuck.
                     try:
                         size = log_path.stat().st_size
                         with open(log_path, "rb") as f:
@@ -220,12 +222,40 @@ def ensure_once(logger=log) -> dict:
                                     last_trading_ts = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
                                     break
                             if last_trading_ts and (time.time() - last_trading_ts) > 900:
-                                logger("bot vivo pero sin actividad de trading en %.0f min -> trato como colgado" % ((time.time()-last_trading_ts)/60))
+                                logger("bot vivo pero sin actividad de trading en %.0f min -> COLGADO" % ((time.time()-last_trading_ts)/60))
+                                bot_stuck = True
                                 bot_up = False
                     except Exception:
                         pass
         except Exception:
             pass
+
+    # Si el bot esta colgado: matarlo, cancelar ordenes huérfanas, resetear backoff.
+    if bot_stuck:
+        pids = bot_pids()
+        for pid in pids:
+            try:
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=30)
+                logger("bot colgado (PID %d) terminado" % pid)
+            except Exception as e:
+                logger("[WARN] no se pudo matar PID %d: %s" % (pid, e))
+        time.sleep(3)
+        # Cancelar ordenes PMM huérfanas (coste $0 si no hay posiciones)
+        try:
+            sys.path.insert(0, str(BASE_DIR))
+            from abot_common import cancel_open_orders
+            n = cancel_open_orders(logger)
+            if n:
+                logger("canceladas %d ordenes PMM huérfanas" % n)
+        except Exception as e:
+            logger("[WARN] cancel_open_orders fallo: %s" % e)
+        # Resetear backoff
+        slot = _slot(state, "bot")
+        slot["last_start"] = 0
+        slot["failures"] = 0
+        slot["alerted"] = False
+        save_state(state)
+        telegram("[ABOT] Bot colgado detectado y reiniciado. Ordenes PMM canceladas (coste $0).")
 
     _mark_stable(state, "bot", bot_up)
     if bot_up:
