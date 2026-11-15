@@ -392,13 +392,16 @@ def _binance_cancel_all(creds: Dict, log) -> int:
     return 0
 
 
-def _okx_headers(creds: Dict, method: str, path: str) -> Dict[str, str]:
+def _okx_headers(creds: Dict, method: str, path: str, body: Optional[str] = None) -> Dict[str, str]:
     key = creds["okx"]["api_key"]
     secret = creds["okx"]["secret_key"]
     passphrase = creds["okx"]["passphrase"]
     ts = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    sign_str = ts + method + path
+    if body is not None:
+        sign_str += body
     sign = base64.b64encode(
-        hmac.new(secret.encode(), (ts + method + path).encode(), hashlib.sha256).digest()
+        hmac.new(secret.encode(), sign_str.encode(), hashlib.sha256).digest()
     ).decode()
     return {
         "OK-ACCESS-KEY": key,
@@ -422,9 +425,10 @@ def _okx_cancel_all(creds: Dict, log) -> int:
     for i in range(0, len(orders), 20):
         chunk = orders[i:i + 20]
         body = [{"instId": OKX_INST, "ordId": oid} for oid in chunk]
+        body_str = json.dumps(body, separators=(",", ":"))
         path2 = "/api/v5/trade/cancel-batch-orders"
-        r2 = requests.post("https://www.okx.com" + path2, json=body,
-                           headers=_okx_headers(creds, "POST", path2), timeout=HTTP_TIMEOUT)
+        r2 = requests.post("https://www.okx.com" + path2, data=body_str,
+                           headers=_okx_headers(creds, "POST", path2, body_str), timeout=HTTP_TIMEOUT)
         d2 = r2.json()
         if d2.get("code") != "0":
             log(f"[WARN] OKX cancel: {d2.get('msg')} ({d2.get('code')})")
