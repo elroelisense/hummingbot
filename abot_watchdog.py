@@ -204,8 +204,10 @@ def ensure_once(logger=log) -> dict:
                     bot_stuck = True
                     bot_up = False
                 else:
-                    # Health check de trading: si en los ultimos 15 min no hay
-                    # ninguna linea de orden creada/llenada, esta stuck.
+                    # Health check de trading: verificar que el bot esta operando,
+                    # no solo que el proceso esta vivo. Si en los ultimos 15 min
+                    # no hay ninguna linea de orden creada/llenada, esta stuck.
+                    # Tambien detectar loops de "Not enough budget" (>20 en 10 min).
                     try:
                         size = log_path.stat().st_size
                         with open(log_path, "rb") as f:
@@ -223,6 +225,28 @@ def ensure_once(logger=log) -> dict:
                                     break
                             if last_trading_ts and (time.time() - last_trading_ts) > 900:
                                 logger("bot vivo pero sin actividad de trading en %.0f min -> COLGADO" % ((time.time()-last_trading_ts)/60))
+                                bot_stuck = True
+                                bot_up = False
+                        # Detectar loop de "Not enough budget"
+                        budget_errors = [l for l in tail.splitlines() if "Not enough budget" in l]
+                        if len(budget_errors) > 20:
+                            last_success = None
+                            for l in reversed(tail.splitlines()):
+                                if "Created" in l or "completely filled" in l:
+                                    m = __import__("re").match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", l)
+                                    if m:
+                                        import datetime
+                                        last_success = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+                                        break
+                            last_error = None
+                            for l in reversed(budget_errors):
+                                m = __import__("re").match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", l)
+                                if m:
+                                    import datetime
+                                    last_error = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+                                    break
+                            if last_error and (last_success is None or last_error > last_success):
+                                logger("bot vivo pero en loop de 'Not enough budget' (%d errores) -> COLGADO" % len(budget_errors))
                                 bot_stuck = True
                                 bot_up = False
                     except Exception:
