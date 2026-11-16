@@ -522,7 +522,9 @@ def compute_settings(exchange: str, bal: Dict, regime: str, vol: float,
     min_buy = MIN_BUY_BINANCE if exchange == "binance" else MIN_BUY_OKX
     # El PMM necesita al menos 3.0 USDT libres para abrir un executor buy.
     # El minimo del exchange (1.20/0.60) no es suficiente para el PMM.
-    min_buy = max(min_buy, 3.0)
+    # El PMM necesita al menos total_amount_quote de USDT libre para buys.
+    # 3.0 no es suficiente: el PMM intenta abrir executors de 5+ USDT.
+    min_buy = max(min_buy, 15.0)  # PMM necesita >=15 USDT libres para evitar Not enough budget
 
     # Escalar notional por volatilidad: en alta vol, vender/comprar mas.
     vol_mult = max(0.6, min(1.5, vol / VOL_BASE_5M if VOL_BASE_5M else 1.0))
