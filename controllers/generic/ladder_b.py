@@ -21,6 +21,9 @@ class LadderConfig(ControllerConfigBase):
     Cada `refresh_interval` segundos cancela los niveles anteriores y los
     recrea al precio actual, adaptandose al mercado. Pensada para correr
     junto a otro controller (ej. PMM) en el mismo script v2_with_controllers.
+
+    Cancelacion y creacion se hacen en ciclos SEPARADOS para evitar
+    ordenes duplicadas por race conditions.
     """
     controller_name: str = "ladder_b"
     controller_type: str = "generic"
@@ -41,6 +44,7 @@ class LadderB(ControllerBase):
         super().__init__(config, *args, **kwargs)
         self.config = config
         self._last_refresh_ts: float = 0.0
+        self._needs_create: bool = False   # True = cancelar primero, crear despues
 
     async def update_processed_data(self):
         mid = self.market_data_provider.get_price_by_type(
@@ -54,52 +58,109 @@ class LadderB(ControllerBase):
             return []
 
         now = self.market_data_provider.time()
+        level_ids = {lvl.level_id for lvl in self.config.levels}
+
+        # Fase 2: crear nuevos niveles (despues de cancelar)
+        if self._needs_create:
+            # Verificar que los niveles anteriores esten cancelados
+            old_active = [
+                ex for ex in self.executors_info
+                if getattr(ex.config, "level_id", None) in level_ids
+                and getattr(ex, "is_active", False)
+            ]
+            if old_active:
+                # Aun hay niveles activos, esperar a que se cancelen
+                return []
+
+            actions: List[ExecutorAction] = []
+            for lvl in self.config.levels:
+                price = mid * (Decimal(1) + lvl.spread)
+                price = self.market_data_provider.quantize_order_price(
+                    self.config.connector_name, self.config.trading_pair, price
+                )
+                amount = self.market_data_provider.quantize_order_amount(
+                    self.config.connector_name, self.config.trading_pair, lvl.amount
+                )
+                if amount <= 0 or price <= 0:
+                    self.logger().warning(
+                        f"Ladder level {lvl.level_id}: amount/price quantized to 0, skipping."
+                    )
+                    continue
+                cfg = OrderExecutorConfig(
+                    timestamp=self.market_data_provider.time(),
+                    connector_name=self.config.connector_name,
+                    trading_pair=self.config.trading_pair,
+                    side=self.config.side,
+                    amount=amount,
+                    price=price,
+                    execution_strategy=ExecutionStrategy.LIMIT_MAKER,
+                    leverage=self.config.leverage,
+                    level_id=lvl.level_id,
+                )
+                actions.append(CreateExecutorAction(controller_id=self.config.id, executor_config=cfg))
+                self.logger().info(
+                    f"Ladder {self.config.side.name} placing {amount} {self.config.trading_pair} "
+                    f"@ {price} (spread {lvl.spread:+.2%}, level {lvl.level_id})"
+                )
+
+            self._needs_create = False
+            self._last_refresh_ts = now
+            return actions
+
+        # Fase 1: verificar si es hora de refrescar
         if self._last_refresh_ts > 0 and (now - self._last_refresh_ts) < self.config.refresh_interval:
             return []
 
-        actions: List[ExecutorAction] = []
-
-        # 1. Cancelar niveles anteriores (solo los activos)
-        level_ids = {lvl.level_id for lvl in self.config.levels}
-        for ex in self.executors_info:
-            lid = getattr(ex.config, "level_id", None)
-            if lid in level_ids and getattr(ex, "is_active", False):
-                actions.append(StopExecutorAction(
-                    controller_id=self.config.id, executor_id=ex.id
-                ))
-
-        # 2. Colocar nuevos niveles al precio actual
-        for lvl in self.config.levels:
-            price = mid * (Decimal(1) + lvl.spread)
-            price = self.market_data_provider.quantize_order_price(
-                self.config.connector_name, self.config.trading_pair, price
-            )
-            amount = self.market_data_provider.quantize_order_amount(
-                self.config.connector_name, self.config.trading_pair, lvl.amount
-            )
-            if amount <= 0 or price <= 0:
-                self.logger().warning(
-                    f"Ladder level {lvl.level_id}: amount/price quantized to 0, skipping."
+        # Fase 1: cancelar niveles anteriores
+        old_executors = [
+            ex for ex in self.executors_info
+            if getattr(ex.config, "level_id", None) in level_ids
+            and getattr(ex, "is_active", False)
+        ]
+        if not old_executors:
+            # No hay niveles activos: crear directamente
+            self._needs_create = False
+            self._last_refresh_ts = now
+            actions = []
+            for lvl in self.config.levels:
+                price = mid * (Decimal(1) + lvl.spread)
+                price = self.market_data_provider.quantize_order_price(
+                    self.config.connector_name, self.config.trading_pair, price
                 )
-                continue
-            cfg = OrderExecutorConfig(
-                timestamp=self.market_data_provider.time(),
-                connector_name=self.config.connector_name,
-                trading_pair=self.config.trading_pair,
-                side=self.config.side,
-                amount=amount,
-                price=price,
-                execution_strategy=ExecutionStrategy.LIMIT_MAKER,
-                leverage=self.config.leverage,
-                level_id=lvl.level_id,
-            )
-            actions.append(CreateExecutorAction(controller_id=self.config.id, executor_config=cfg))
-            self.logger().info(
-                f"Ladder {self.config.side.name} placing {amount} {self.config.trading_pair} "
-                f"@ {price} (spread {lvl.spread:+.2%}, level {lvl.level_id})"
-            )
+                amount = self.market_data_provider.quantize_order_amount(
+                    self.config.connector_name, self.config.trading_pair, lvl.amount
+                )
+                if amount <= 0 or price <= 0:
+                    continue
+                cfg = OrderExecutorConfig(
+                    timestamp=self.market_data_provider.time(),
+                    connector_name=self.config.connector_name,
+                    trading_pair=self.config.trading_pair,
+                    side=self.config.side,
+                    amount=amount,
+                    price=price,
+                    execution_strategy=ExecutionStrategy.LIMIT_MAKER,
+                    leverage=self.config.leverage,
+                    level_id=lvl.level_id,
+                )
+                actions.append(CreateExecutorAction(controller_id=self.config.id, executor_config=cfg))
+                self.logger().info(
+                    f"Ladder {self.config.side.name} placing {amount} {self.config.trading_pair} "
+                    f"@ {price} (spread {lvl.spread:+.2%}, level {lvl.level_id})"
+                )
+            return actions
 
-        self._last_refresh_ts = now
+        # Hay niveles activos: cancelar primero, crear en el proximo ciclo
+        self._needs_create = True
+        self._last_refresh_ts = now  # reset timer para que la creacion no se retrase
+        actions = []
+        for ex in old_executors:
+            actions.append(StopExecutorAction(
+                controller_id=self.config.id, executor_id=ex.id
+            ))
+            self.logger().info(
+                f"Ladder canceling {getattr(ex.config, 'level_id', '?')} before refresh"
+            )
         return actions
 
     def to_format_status(self) -> List[str]:
