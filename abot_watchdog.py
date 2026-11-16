@@ -245,7 +245,9 @@ def ensure_once(logger=log) -> dict:
                                     import datetime
                                     last_error = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
                                     break
-                            if last_error and (last_success is None or last_error > last_success):
+                            # Si hay >20 errores de budget en 10 min, esta stuck
+                            # sin importar si hay otras ordenes exitosas.
+                            if len(budget_errors) > 20:
                                 logger("bot vivo pero en loop de 'Not enough budget' (%d errores) -> COLGADO" % len(budget_errors))
                                 bot_stuck = True
                                 bot_up = False
