@@ -51,7 +51,7 @@ LOOP_SECONDS = 30
 MIN_RETRY_SECONDS = 60
 MAX_RETRY_SECONDS = 900
 STABLE_SECONDS = 300
-LOG_STALE_SECONDS = 600
+LOG_STALE_SECONDS = 300
 HEARTBEAT_FILE = DATA_DIR / "abot_heartbeat.txt"
 
 log = make_logger("abot_watchdog")
@@ -223,13 +223,13 @@ def ensure_once(logger=log) -> dict:
                                     import datetime
                                     last_trading_ts = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
                                     break
-                            if last_trading_ts and (time.time() - last_trading_ts) > 900:
+                            if last_trading_ts and (time.time() - last_trading_ts) > 300:
                                 logger("bot vivo pero sin actividad de trading en %.0f min -> COLGADO" % ((time.time()-last_trading_ts)/60))
                                 bot_stuck = True
                                 bot_up = False
                         # Detectar loop de "Not enough budget"
                         budget_errors = [l for l in tail.splitlines() if "Not enough budget" in l]
-                        if len(budget_errors) > 20:
+                        if len(budget_errors) > 10:
                             last_success = None
                             for l in reversed(tail.splitlines()):
                                 if "Created" in l or "completely filled" in l:
@@ -265,7 +265,7 @@ def ensure_once(logger=log) -> dict:
                 logger("bot colgado (PID %d) terminado" % pid)
             except Exception as e:
                 logger("[WARN] no se pudo matar PID %d: %s" % (pid, e))
-        time.sleep(3)
+        time.sleep(5)
         # Cancelar ordenes PMM huérfanas (coste $0 si no hay posiciones)
         try:
             sys.path.insert(0, str(BASE_DIR))
@@ -275,13 +275,19 @@ def ensure_once(logger=log) -> dict:
                 logger("canceladas %d ordenes PMM huérfanas" % n)
         except Exception as e:
             logger("[WARN] cancel_open_orders fallo: %s" % e)
-        # Resetear backoff
+        # Resetear backoff COMPLETAMENTE (sin delay)
         slot = _slot(state, "bot")
         slot["last_start"] = 0
         slot["failures"] = 0
         slot["alerted"] = False
         save_state(state)
         telegram("[ABOT] Bot colgado detectado y reiniciado. Ordenes PMM canceladas (coste $0).")
+        # Iniciar nuevo bot INMEDIATAMENTE
+        start_bot(state)
+        result["bot"] = "starting"
+        _write_heartbeat()
+        save_state(state)
+        return result
 
     _mark_stable(state, "bot", bot_up)
     if bot_up:
