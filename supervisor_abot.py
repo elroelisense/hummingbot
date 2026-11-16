@@ -135,9 +135,9 @@ OKX_INST = "PEPE-USDT"
 
 # --- Gestión de capital ------------------------------------------------------
 FREE_USE_PCT = 0.80        # usamos como máximo el 80% del USDT libre
-MAX_QUOTE = 8.0            # tope por controller (USDT)
-SELL_QUOTE_TARGET = 5.0    # notional de venta cuando las compras están pausadas
-AGGRESSIVE_SELL_QUOTE = 8.0  # notional de venta cuando inventario crítico (>90% PEPE)
+MAX_QUOTE = 12.0           # tope por controller (USDT) - subido de 8.0
+SELL_QUOTE_TARGET = 8.0    # notional de venta cuando las compras están pausadas - subido de 5.0
+AGGRESSIVE_SELL_QUOTE = 12.0  # notional de venta cuando inventario crítico (>90% PEPE) - subido de 8.0
 MIN_BUY_BINANCE = 1.20     # minNotional Binance = 1.00 USDT (+ margen)
 MIN_BUY_OKX = 0.60         # minSz OKX = 100.000 PEPE (~0.46 USDT)
 MAX_INVENTORY_PCT = 0.85   # si PEPE > 85% del portafolio -> pausar compras
@@ -520,6 +520,9 @@ def compute_settings(exchange: str, bal: Dict, regime: str, vol: float,
 
     usdt_free = bal["usdt_free"]
     min_buy = MIN_BUY_BINANCE if exchange == "binance" else MIN_BUY_OKX
+    # El PMM necesita al menos 3.0 USDT libres para abrir un executor buy.
+    # El minimo del exchange (1.20/0.60) no es suficiente para el PMM.
+    min_buy = max(min_buy, 3.0)
 
     # Escalar notional por volatilidad: en alta vol, vender/comprar mas.
     vol_mult = max(0.6, min(1.5, vol / VOL_BASE_5M if VOL_BASE_5M else 1.0))
