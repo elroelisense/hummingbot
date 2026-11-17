@@ -136,7 +136,7 @@ OKX_INST = "PEPE-USDT"
 # --- Gestión de capital ------------------------------------------------------
 FREE_USE_PCT = 0.80        # usamos como máximo el 80% del USDT libre
 MAX_QUOTE = 12.0           # tope por controller (USDT) - subido de 8.0
-SELL_QUOTE_TARGET = 8.0    # notional de venta cuando las compras están pausadas - subido de 5.0
+SELL_QUOTE_TARGET = 12.0   # notional de venta cuando las compras estan pausadas - subido a 12
 AGGRESSIVE_SELL_QUOTE = 12.0  # notional de venta cuando inventario crítico (>90% PEPE) - subido de 8.0
 MIN_BUY_BINANCE = 1.20     # minNotional Binance = 1.00 USDT (+ margen)
 MIN_BUY_OKX = 0.60         # minSz OKX = 100.000 PEPE (~0.46 USDT)
@@ -508,7 +508,8 @@ def apply_pmm_settings(path: Path, settings: Dict, dry_run: bool) -> bool:
 
 
 def compute_settings(exchange: str, bal: Dict, regime: str, vol: float,
-                     price: float, global_inv_pct: float) -> Tuple[Dict, str]:
+                     price: float, global_inv_pct: float,
+                     exchange_inv_pct: float = None) -> Tuple[Dict, str]:
     """
     Calcula los campos a escribir en el YAML del PMM de un exchange.
     Devuelve (settings, motivo_pausa|"").
@@ -516,6 +517,9 @@ def compute_settings(exchange: str, bal: Dict, regime: str, vol: float,
     global_inv_pct = % del portafolio TOTAL que esta en PEPE (no por exchange).
     vol = volatilidad 5m para escalar notional por volatilidad.
     """
+    if exchange_inv_pct is None:
+        exchange_inv_pct = global_inv_pct
+
     buy_spread, sell_spread = regime_spreads(regime, vol)
 
     usdt_free = bal["usdt_free"]
@@ -527,16 +531,16 @@ def compute_settings(exchange: str, bal: Dict, regime: str, vol: float,
     min_buy = max(min_buy, 15.0)  # PMM necesita >=15 USDT libres para evitar Not enough budget
 
     # Escalar notional por volatilidad: en alta vol, vender/comprar mas.
-    vol_mult = max(0.6, min(1.5, vol / VOL_BASE_5M if VOL_BASE_5M else 1.0))
+    vol_mult = max(1.0, min(1.5, vol / VOL_BASE_5M if VOL_BASE_5M else 1.0))
 
     pause_reason = ""
     rebalance_mode = "normal"
     if regime == "CRASH":
         pause_reason = "CRASH: no comprar en caida libre"
-    elif global_inv_pct > CRITICAL_INVENTORY_PCT:
+    elif exchange_inv_pct > CRITICAL_INVENTORY_PCT:
         pause_reason = "inventario PEPE CRITICO %.1f%% > %.0f%%" % (global_inv_pct*100, CRITICAL_INVENTORY_PCT*100)
         rebalance_mode = "aggressive_sell"
-    elif global_inv_pct > MAX_INVENTORY_PCT:
+    elif exchange_inv_pct > MAX_INVENTORY_PCT:
         pause_reason = "inventario PEPE alto %.1f%% > %.0f%%" % (global_inv_pct*100, MAX_INVENTORY_PCT*100)
         rebalance_mode = "sell_only"
     elif usdt_free < min_buy:
@@ -544,10 +548,10 @@ def compute_settings(exchange: str, bal: Dict, regime: str, vol: float,
 
     if pause_reason:
         if rebalance_mode == "aggressive_sell":
-            sell_target = min(10.0, AGGRESSIVE_SELL_QUOTE * vol_mult)
+            sell_target = min(12.0, AGGRESSIVE_SELL_QUOTE * vol_mult)
             sell_sp = max(0.002, round(sell_spread * 0.5, 4))
         else:
-            sell_target = min(8.0, SELL_QUOTE_TARGET * vol_mult)
+            sell_target = min(12.0, SELL_QUOTE_TARGET * vol_mult)
             sell_sp = sell_spread
         settings = {
             "total_amount_quote": round(sell_target, 2),
@@ -555,11 +559,12 @@ def compute_settings(exchange: str, bal: Dict, regime: str, vol: float,
             "buy_amounts_pct": [],
             "sell_spreads": [sell_sp],
             "sell_amounts_pct": [1.0],
+            "skip_rebalance": True,
         }
         return settings, pause_reason
 
     # Con compras: ajustar split segun inventario.
-    if global_inv_pct <= LOW_INVENTORY_PCT:
+    if exchange_inv_pct <= LOW_INVENTORY_PCT:
         buy_pct = 0.7
         sell_pct = 0.3
         total = min(MAX_QUOTE, max(2.0, (usdt_free * FREE_USE_PCT) / buy_pct))
@@ -575,6 +580,7 @@ def compute_settings(exchange: str, bal: Dict, regime: str, vol: float,
         "buy_amounts_pct": [buy_pct],
         "sell_spreads": [sell_spread],
         "sell_amounts_pct": [sell_pct],
+        "skip_rebalance": False,
     }
     return settings, ""
 
@@ -756,7 +762,8 @@ def run_once(creds: Dict, state: Dict, dry_run: bool) -> bool:
         if not bal:
             log(f"[WARN] {exchange}: sin balance, no se modifica {filename}")
             continue
-        settings, pause = compute_settings(exchange, bal, regime, vol, price, global_inv_pct)
+        ex_inv = (bal["pepe_free"] + bal["pepe_locked"]) * price / (bal["usdt_free"] + bal["usdt_locked"] + (bal["pepe_free"] + bal["pepe_locked"]) * price) if (bal["usdt_free"] + bal["usdt_locked"] + (bal["pepe_free"] + bal["pepe_locked"]) * price) > 0 else 1.0
+        settings, pause = compute_settings(exchange, bal, regime, vol, price, global_inv_pct, ex_inv)
         if pause:
             pause_notes.append(f"{exchange}: {pause}")
         if apply_pmm_settings(CONF_DIR / filename, settings, dry_run):
