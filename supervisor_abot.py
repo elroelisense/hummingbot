@@ -572,36 +572,47 @@ def compute_settings(exchange: str, bal: Dict, regime: str, vol: float,
     if pause_reason:
         if rebalance_mode == "aggressive_sell":
             sell_target = min(12.0, AGGRESSIVE_SELL_QUOTE * vol_mult)
-            sell_sp = max(0.002, round(sell_spread * 0.5, 4))
+            sell_sp1 = max(0.002, round(sell_spread * 0.5, 4))
+            sell_sp2 = max(0.005, round(sell_spread * 1.0, 4))
+            sell_spreads = [sell_sp1, sell_sp2]
+            sell_pcts = [0.6, 0.4]
         else:
             sell_target = min(8.0, SELL_QUOTE_TARGET * vol_mult)
-            sell_sp = sell_spread
+            sell_sp1 = sell_spread
+            sell_sp2 = round(sell_spread * 2.0, 4)
+            sell_spreads = [sell_sp1, sell_sp2]
+            sell_pcts = [0.6, 0.4]
         settings = {
             "total_amount_quote": round(sell_target, 2),
             "buy_spreads": [],
             "buy_amounts_pct": [],
-            "sell_spreads": [sell_sp],
-            "sell_amounts_pct": [1.0],
+            "sell_spreads": sell_spreads,
+            "sell_amounts_pct": sell_pcts,
         }
         return settings, pause_reason
 
     # Con compras: ajustar split segun inventario.
+    # Multi-nivel: 2 niveles por lado para mas fills sin sacrificar margen.
     if rebalance_mode == "accumulate":
-        buy_pct = 0.7
-        sell_pct = 0.3
-        total = min(MAX_QUOTE, max(2.0, (usdt_free * FREE_USE_PCT) / buy_pct))
+        buy_pct1, buy_pct2 = 0.6, 0.4
+        sell_pct1, sell_pct2 = 0.6, 0.4
+        total = min(MAX_QUOTE, max(2.0, (usdt_free * FREE_USE_PCT) / 0.7))
     else:
-        buy_pct = 0.5
-        sell_pct = 0.5
+        buy_pct1, buy_pct2 = 0.6, 0.4
+        sell_pct1, sell_pct2 = 0.6, 0.4
         total = min(MAX_QUOTE, max(2.0, (usdt_free * FREE_USE_PCT) / 0.5))
     total = round(total * vol_mult, 2)
     total = max(2.0, min(MAX_QUOTE, total))
+    buy_sp1 = buy_spread
+    buy_sp2 = round(buy_spread * 1.6, 4)
+    sell_sp1 = sell_spread
+    sell_sp2 = round(sell_spread * 1.6, 4)
     settings = {
         "total_amount_quote": total,
-        "buy_spreads": [buy_spread],
-        "buy_amounts_pct": [buy_pct],
-        "sell_spreads": [sell_spread],
-        "sell_amounts_pct": [sell_pct],
+        "buy_spreads": [buy_sp1, buy_sp2],
+        "buy_amounts_pct": [buy_pct1, buy_pct2],
+        "sell_spreads": [sell_sp1, sell_sp2],
+        "sell_amounts_pct": [sell_pct1, sell_pct2],
     }
     return settings, ""
 
