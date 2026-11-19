@@ -464,24 +464,34 @@ def write_yaml_atomic(path: Path, cfg: Dict, expected_id: str) -> bool:
         log(f"[ERROR] {path.name}: id inesperado, no se escribe")
         return False
     tmp = path.with_suffix(path.suffix + ".tmp")
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False, allow_unicode=True)
-        # validar antes de reemplazar
-        with open(tmp, "r", encoding="utf-8") as f:
-            check = yaml.safe_load(f)
-        if check.get("id") != expected_id:
-            raise ValueError("YAML resultante inválido")
-        os.replace(tmp, path)
-        return True
-    except Exception as e:
-        log(f"[ERROR] escribiendo {path.name}: {e}")
+    for attempt in range(5):
         try:
-            if tmp.exists():
-                tmp.unlink()
-        except Exception:
-            pass
-        return False
+            with open(tmp, "w", encoding="utf-8") as f:
+                yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False, allow_unicode=True)
+            # validar antes de reemplazar
+            with open(tmp, "r", encoding="utf-8") as f:
+                check = yaml.safe_load(f)
+            if check.get("id") != expected_id:
+                raise ValueError("YAML resultante invalido")
+            # os.replace puede fallar en Windows si el archivo esta bloqueado
+            # por el bot (lo lee cada 10s). Reintentar con delay.
+            try:
+                os.replace(tmp, path)
+                return True
+            except (PermissionError, OSError) as pe:
+                if attempt < 4:
+                    time.sleep(0.5)
+                    continue
+                raise pe
+        except Exception as e:
+            log(f"[ERROR] escribiendo {path.name}: {e}")
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except Exception:
+                pass
+            return False
+    return False
 
 
 def apply_pmm_settings(path: Path, settings: Dict, dry_run: bool) -> bool:
