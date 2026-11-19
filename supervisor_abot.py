@@ -512,6 +512,27 @@ def apply_pmm_settings(path: Path, settings: Dict, dry_run: bool) -> bool:
     return ok
 
 
+def apply_ladder_refresh(path: Path, vol: float, dry_run: bool) -> bool:
+    """Ajusta el refresh_interval de una escalera segun la volatilidad.
+    Vol baja (<0.5%): 600s (10 min). Vol media: 300s (5 min). Vol alta: 120s (2 min).
+    """
+    cfg = read_yaml(path)
+    if cfg is None:
+        return False
+    expected_id = str(cfg.get("id", ""))
+    new_interval = 600 if vol < 0.005 else (300 if vol < 0.015 else 120)
+    if cfg.get("refresh_interval") == new_interval:
+        return False
+    if dry_run:
+        log(f"[DRY-RUN] {path.name}: refresh_interval -> {new_interval}")
+        return False
+    cfg["refresh_interval"] = new_interval
+    ok = write_yaml_atomic(path, cfg, expected_id)
+    if ok:
+        log(f"[OK] {path.name}: refresh_interval -> {new_interval}")
+    return ok
+
+
 # ============================================================================
 # LÓGICA PRINCIPAL
 # ============================================================================
@@ -800,6 +821,12 @@ def run_once(creds: Dict, state: Dict, dry_run: bool) -> bool:
         if pause:
             pause_notes.append(f"{exchange}: {pause}")
         if apply_pmm_settings(CONF_DIR / filename, settings, dry_run):
+            did_change = True
+
+    # Ajustar refresh_interval de las escaleras segun volatilidad
+    for ladder_file in ("conf_ladder_b.yml", "conf_ladder_okx.yml",
+                        "conf_ladder_buy_binance.yml", "conf_ladder_buy_okx.yml"):
+        if apply_ladder_refresh(CONF_DIR / ladder_file, vol, dry_run):
             did_change = True
 
     log(ladder_recommendation(price, regime))

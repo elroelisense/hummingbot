@@ -33,7 +33,7 @@ class LadderConfig(ControllerConfigBase):
     leverage: int = 1
     position_mode: PositionMode = PositionMode.HEDGE
     levels: List[LadderLevel] = Field(default_factory=list)
-    refresh_interval: int = 300   # segundos entre re-colocaciones
+    refresh_interval: int = Field(default=300, json_schema_extra={"is_updatable": True})
 
     def update_markets(self, markets: MarketDict) -> MarketDict:
         return markets.add_or_update(self.connector_name, self.trading_pair)
