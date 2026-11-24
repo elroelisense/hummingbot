@@ -192,6 +192,39 @@ def ensure_once(logger=log) -> dict:
     bot_up = bot_is_running()
     bot_stuck = False
 
+    # Deteccion de datos de mercado obsoletos: si el ultimo precio del bot
+    # difiere del precio actual del mercado en mas de 3%, el bot esta usando
+    # datos stale (websocket desconectado) -> reiniciar.
+    if bot_up:
+        try:
+            import re as _re
+            # Leer ultimo precio del supervisor log
+            sup_log = BASE_DIR / "logs" / "supervisor_abot.log"
+            if sup_log.exists():
+                with open(sup_log, "rb") as f:
+                    f.seek(max(0, sup_log.stat().st_size - 50000))
+                    sup_tail = f.read().decode("utf-8", "replace")
+                # Buscar ultimo precio PEPE
+                prices = _re.findall(r"PEPE (0\.\d+)", sup_tail)
+                if prices:
+                    sup_price = float(prices[-1])
+                    # Precio actual del mercado
+                    import requests as _req
+                    try:
+                        r = _req.get("https://api.binance.com/api/v3/ticker/price",
+                                     params={"symbol": "PEPEUSDT"}, timeout=5)
+                        market_price = float(r.json()["price"])
+                        if sup_price > 0 and market_price > 0:
+                            diff_pct = abs(sup_price - market_price) / market_price
+                            if diff_pct > 0.03:
+                                logger("bot usando datos stale: supervisor=%.8f mercado=%.8f (diff %.1f%%) -> COLGADO" % (sup_price, market_price, diff_pct*100))
+                                bot_stuck = True
+                                bot_up = False
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     # Deteccion de bot "colgado": proceso vivo pero log sin actualizar en 10 min
     # O proceso vivo pero sin actividad de trading en 15 min.
     if bot_up:
