@@ -787,12 +787,22 @@ def run_once(creds: Dict, state: Dict, dry_run: bool) -> bool:
     bal_b = binance_balances(creds)
     bal_o = okx_balances(creds)
 
+    # Si no se pudo leer NINGUN balance, saltar el ciclo para no generar
+    # falsos positivos (inventario 100% PEPE cuando en realidad no sabemos).
+    if bal_b is None and bal_o is None:
+        log("[WARN] No se pudo leer balances de ningun exchange. Saltando ciclo.")
+        last_inv = state.get("last_inv_pct", 0.5)
+        log("Usando inventario anterior: %.1f%%" % (last_inv*100))
+        return False
+
     if bal_b:
-        log(f"BINANCE  USDT libre {bal_b['usdt_free']:.2f} / bloqueado {bal_b['usdt_locked']:.2f} "
-            f"| PEPE {bal_b['pepe_free']:,.0f} + {bal_b['pepe_locked']:,.0f} bloqueado")
+        log("BINANCE  USDT libre %.2f / bloqueado %.2f | PEPE %.0f + %.0f bloqueado" % (bal_b['usdt_free'], bal_b['usdt_locked'], bal_b['pepe_free'], bal_b['pepe_locked']))
+    else:
+        log("[WARN] Binance: sin balance, usando solo OKX para calculos")
     if bal_o:
-        log(f"OKX      USDT libre {bal_o['usdt_free']:.2f} / bloqueado {bal_o['usdt_locked']:.2f} "
-            f"| PEPE {bal_o['pepe_free']:,.0f} + {bal_o['pepe_locked']:,.0f} bloqueado")
+        log("OKX      USDT libre %.2f / bloqueado %.2f | PEPE %.0f + %.0f bloqueado" % (bal_o['usdt_free'], bal_o['usdt_locked'], bal_o['pepe_free'], bal_o['pepe_locked']))
+    else:
+        log("[WARN] OKX: sin balance, usando solo Binance para calculos")
 
     portfolio = 0.0
     pepe_value_total = 0.0
@@ -801,10 +811,12 @@ def run_once(creds: Dict, state: Dict, dry_run: bool) -> bool:
             portfolio += bal["usdt_free"] + bal["usdt_locked"] + \
                 (bal["pepe_free"] + bal["pepe_locked"]) * price
             pepe_value_total += (bal["pepe_free"] + bal["pepe_locked"]) * price
-    global_inv_pct = (pepe_value_total / portfolio) if portfolio > 0 else 1.0
+    global_inv_pct = (pepe_value_total / portfolio) if portfolio > 0 else state.get("last_inv_pct", 0.5)
     if portfolio > 0:
-        log(f"PORTAFOLIO ~{portfolio:.2f} USDT | PEPE {global_inv_pct:.1%} | "
-            f"USDT {1 - global_inv_pct:.1%}")
+        log("PORTAFOLIO ~%.2f USDT | PEPE %.1f%% | USDT %.1f%%" % (portfolio, global_inv_pct*100, (1-global_inv_pct)*100))
+        state["last_inv_pct"] = global_inv_pct
+    else:
+        log("[WARN] No se pudo calcular portafolio. Usando inventario anterior.")
 
     did_change = False
     pause_notes = []
@@ -841,15 +853,16 @@ def run_once(creds: Dict, state: Dict, dry_run: bool) -> bool:
     for note in pause_notes:
         telegram_alert(state, f"pause_{note}", f"Compras PAUSADAS: {note}.", dry_run)
 
-    if global_inv_pct > CRITICAL_INVENTORY_PCT:
-        telegram_alert(state, "inventory_critical",
-                       "Inventario PEPE CRITICO: %.1f%%. Venta agresiva activada (spread tighter, 8 USDT). USDT libre total %.2f." % (global_inv_pct*100, sum(b['usdt_free'] for b in (bal_b, bal_o) if b)), dry_run)
-    elif global_inv_pct > MAX_INVENTORY_PCT:
-        telegram_alert(state, "inventory_high",
-                       "Inventario PEPE %.1f%% del portafolio. USDT libre total %.2f." % (global_inv_pct*100, sum(b['usdt_free'] for b in (bal_b, bal_o) if b)), dry_run)
+    if bal_b is not None or bal_o is not None:
+        if global_inv_pct > CRITICAL_INVENTORY_PCT:
+            telegram_alert(state, "inventory_critical",
+                           "Inventario PEPE CRITICO: %.1f%%. Venta agresiva activada. USDT libre total %.2f." % (global_inv_pct*100, sum(b['usdt_free'] for b in (bal_b, bal_o) if b)), dry_run)
+        elif global_inv_pct > MAX_INVENTORY_PCT:
+            telegram_alert(state, "inventory_high",
+                           "Inventario PEPE %.1f%% del portafolio. USDT libre total %.2f." % (global_inv_pct*100, sum(b['usdt_free'] for b in (bal_b, bal_o) if b)), dry_run)
 
     # Rebalanceo real: vender PEPE a mercado si inventario critico
-    if global_inv_pct > 0.95:
+    if (bal_b is not None or bal_o is not None) and global_inv_pct > 0.95:
         rebalance_inventory(creds, global_inv_pct, price, state, dry_run)
 
     # Alerta de PnL diario
