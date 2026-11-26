@@ -225,6 +225,37 @@ def ensure_once(logger=log) -> dict:
         except Exception:
             pass
 
+    # Check bot's own market data: parse last "Created" order price from bot log
+    if bot_up and not bot_stuck:
+        try:
+            import re as _re2
+            bot_log = BASE_DIR / "logs" / "logs_conf_v6_global.log"
+            if bot_log.exists():
+                size = bot_log.stat().st_size
+                with open(bot_log, "rb") as f:
+                    f.seek(max(0, size - 100000))
+                    bot_tail = f.read().decode("utf-8", "replace")
+                # Find last "Created ... order ... at PRICE"
+                created_prices = _re2.findall(r"Created .* order .* at ([0-9.]+)", bot_tail)
+                if created_prices:
+                    bot_price = float(created_prices[-1])
+                    # Get current market price
+                    import requests as _req2
+                    try:
+                        r = _req2.get("https://api.binance.com/api/v3/ticker/price",
+                                     params={"symbol": "PEPEUSDT"}, timeout=5)
+                        current_market = float(r.json()["price"])
+                        if bot_price > 0 and current_market > 0:
+                            bot_diff = abs(bot_price - current_market) / current_market
+                            if bot_diff > 0.05:
+                                logger("bot usando datos stale: ultima orden @%.8f mercado=%.8f (diff %.1f%%) -> COLGADO" % (bot_price, current_market, bot_diff*100))
+                                bot_stuck = True
+                                bot_up = False
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     # Deteccion de bot "colgado": proceso vivo pero log sin actualizar en 10 min
     # O proceso vivo pero sin actividad de trading en 15 min.
     if bot_up:
